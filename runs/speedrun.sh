@@ -68,7 +68,7 @@ echo "Waiting for dataset download to complete..."
 wait $DATASET_DOWNLOAD_PID
 
 # d24 model (slightly undertrained to beat GPT-2 => decrease data:params ratio from compute optimal 10.5 (default) to 8)
-python -m scripts.base_train --depth=24 --target-param-data-ratio=8 --eval-tokens=1048576 --device-batch-size=2 --fp8 --run=$WANDB_RUN
+python -m scripts.base_train --depth=24 --target-param-data-ratio=8 --eval-tokens=1048576 --device-batch-size=2 --save-every 800 --fp8 --run=$WANDB_RUN
 # evaluate the model: CORE metric, BPB on train/val, and draw samples
 python -m scripts.base_eval --device-batch-size=2 --split-tokens=8048576
 
