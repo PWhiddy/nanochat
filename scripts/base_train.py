@@ -32,6 +32,8 @@ from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
+from nanochat.training_sample import TokenSampleSchedule, generate_training_sample
+from nanochat.training_checks import check_finite_tensors
 from nanochat.flash_attention import HAS_FA3
 from scripts.base_eval import evaluate_core
 print_banner()
@@ -44,7 +46,7 @@ parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('d
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 # FP8 training
-parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU)")
+parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires CUDA SM 89 or newer, including RTX 4090)")
 parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower)")
 # Model architecture
 parser.add_argument("--depth", type=int, default=20, help="depth of the Transformer model")
@@ -74,10 +76,15 @@ parser.add_argument("--eval-tokens", type=int, default=80*524288, help="number o
 parser.add_argument("--core-metric-every", type=int, default=2000, help="evaluate CORE metric every N steps (-1 = disable)")
 parser.add_argument("--core-metric-max-per-task", type=int, default=500, help="examples per task for CORE metric")
 parser.add_argument("--sample-every", type=int, default=2000, help="sample from model every N steps (-1 = disable)")
+parser.add_argument("--sample-every-tokens", type=int, default=10_000_000, help="fixed-prompt sample before training and every N training tokens (-1 = disable)")
+parser.add_argument("--sample-prompt", type=str, default="I was the first day of August.", help="fixed prompt for token-based training samples")
+parser.add_argument("--sample-max-tokens", type=int, default=512, help="number of additional tokens in each fixed-prompt sample")
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
 args = parser.parse_args()
+if args.sample_max_tokens < 1:
+    parser.error("--sample-max-tokens must be positive")
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
 # Compute init and wandb logging
@@ -412,10 +419,34 @@ print0(f"Tokens / micro-batch / rank: {args.device_batch_size} x {args.max_seq_l
 print0(f"Tokens / micro-batch: {world_tokens_per_fwdbwd:,}")
 print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
 
+sample_schedule = TokenSampleSchedule(args.sample_every_tokens, start_tokens=step * total_batch_size)
+sample_time = 0.0
+sample_training_time = 0.0
+
 # Go!
 while True:
     last_step = step == num_iterations # loop runs num_iterations+1 times so that we can eval/save at the end
     flops_so_far = num_flops_per_token * total_batch_size * step
+
+    # Run before validation so the initial sample is visible before any training/eval.
+    # Only rank zero generates; other ranks wait, without entering training collectives.
+    # No model copy, checkpoint write, or inference graph compilation is needed.
+    tokens_seen = step * total_batch_size
+    if sample_schedule.due(tokens_seen):
+        if master_process:
+            print0(f"\n--- Training sample | step {step:05d} | {tokens_seen:,} training tokens | +{args.sample_max_tokens} tokens ---", flush=True)
+            synchronize()
+            sample_start = time.perf_counter()
+            with disable_fp8(orig_model):
+                completion = generate_training_sample(orig_model, tokenizer, args.sample_prompt, args.sample_max_tokens)
+            print0(args.sample_prompt + completion, flush=True)
+            elapsed = time.perf_counter() - sample_start
+            sample_time += elapsed
+            overhead = 100 * sample_time / (sample_time + sample_training_time)
+            overhead_text = f" | sampling share of training + sampling time: {overhead:.2f}%" if sample_training_time else ""
+            print0(f"--- Sample took {elapsed:.2f}s{overhead_text} ---\n", flush=True)
+        if ddp:
+            dist.barrier()
 
     # once in a while: evaluate the val bpb (all ranks participate)
     if args.eval_every > 0 and (last_step or step % args.eval_every == 0):
@@ -507,15 +538,23 @@ while True:
     # evaluate the gradient
     synchronize()
     t0 = time.time()
+    train_loss = torch.zeros((), device=device, dtype=torch.float32)
     for micro_step in range(grad_accum_steps):
         loss = model(x, y)
-        train_loss = loss.detach() # for logging
+        train_loss += loss.detach() / grad_accum_steps # mean over all micro-batches
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         if scaler is not None:
             scaler.scale(loss).backward()
         else:
             loss.backward()
         x, y, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
+    # Catch a non-finite loss in ANY micro-batch or a bad backward before weights change.
+    # FP16's GradScaler handles overflowing gradients itself by skipping the update.
+    tensors_to_check = [("loss", train_loss)]
+    if scaler is None:
+        tensors_to_check.extend((f"gradient:{name}", p.grad) for name, p in orig_model.named_parameters())
+    check_finite_tensors(tensors_to_check, step=step, phase="before optimizer update")
+    del tensors_to_check # let zero_grad release gradient storage before the next step
     # step the optimizer
     lrm = get_lr_multiplier(step)
     muon_momentum = get_muon_momentum(step)
@@ -537,11 +576,14 @@ while True:
         scaler.update()
     else:
         optimizer.step()
+    # Also catch failures introduced by the optimizer, before sampling or checkpointing.
+    check_finite_tensors(orig_model.named_parameters(), step=step, phase="after optimizer update")
     model.zero_grad(set_to_none=True)
     train_loss_f = train_loss.item() # .item() is a CPU-GPU sync point
     synchronize()
     t1 = time.time()
     dt = t1 - t0
+    sample_training_time += dt
     # -------------------------------------------------------------------------
 
     # logging (CPU action only)

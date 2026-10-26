@@ -50,23 +50,11 @@ a handler for every tensor operation that might touch an FP8 tensor.
 
 We take a simpler approach: a single autograd.Function (_Float8Matmul) that takes
 full-precision inputs, quantizes to FP8 internally, calls _scaled_mm, and returns
-full-precision outputs. Marked @allow_in_graph so torch.compile treats it as one
-opaque node rather than trying to trace inside.
-
-The trade-off is in how torch.compile sees the two approaches:
-  - torchao: compile decomposes the tensor subclass (via __tensor_flatten__) and
-    sees every individual op (amax, scale, cast, _scaled_mm) as separate graph
-    nodes. Inductor can fuse these with surrounding operations (e.g. fuse the
-    amax computation with the preceding layer's activation function).
-  - ours: compile sees a single opaque call. It can optimize everything around
-    the FP8 linear (attention, norms, etc.) but cannot fuse across the boundary.
-
-Both call the exact same cuBLAS _scaled_mm kernel — the GPU matmul is identical.
-The difference is only in the "glue" ops (amax, scale, cast) which are tiny
-compared to the matmul. In practice this means our version is slightly faster
-(less compilation overhead, no tensor subclass dispatch cost) but can produce
-subtly different floating-point rounding paths under torch.compile, since Inductor
-generates a different graph. Numerics are bitwise identical in eager mode.
+full-precision outputs. @allow_in_graph skips Dynamo tracing of the function,
+but AOTAutograd and Inductor still trace and optimize its forward and backward.
+Quantization can therefore fuse with surrounding operations. Only the gradient
+transpose uses an opaque custom operation, to avoid a verified corrupting
+quantization/transpose fusion on SM89 (see _fp8_transpose).
 """
 
 import torch
@@ -118,9 +106,26 @@ def _to_col_major(x):
     return x.t().contiguous().t()
 
 
-# allow_in_graph tells torch.compile to treat this as an opaque operation —
-# dynamo won't try to decompose it into smaller ops. See the module docstring
-# for how this differs from torchao's tensor subclass approach.
+@torch.library.custom_op("nanochat::fp8_transpose", mutates_args=())
+def _fp8_transpose(x: torch.Tensor) -> torch.Tensor:
+    """Materialize the gradient transpose without fusing it with quantization.
+
+    On SM89 with PyTorch 2.9.1, Inductor's fused quantize + dual-output
+    transpose kernel corrupts the transposed E5M2 values at the vocabulary
+    projection's training shape. The row-major output stays finite while its
+    supposed transpose contains NaNs. An opaque copy boundary keeps both
+    backward GEMMs in FP8 and uses PyTorch's correct transpose implementation.
+    Related upstream compiler bug: https://github.com/triton-lang/triton/issues/11111
+    """
+    return x.t().contiguous()
+
+
+@_fp8_transpose.register_fake
+def _fp8_transpose_fake(x):
+    return x.new_empty((x.shape[1], x.shape[0]))
+
+
+# Dynamo passes this through; AOTAutograd still traces the forward and backward.
 @torch._dynamo.allow_in_graph
 class _Float8Matmul(torch.autograd.Function):
     """Custom autograd for the three FP8 GEMMs of a Linear layer.
@@ -178,7 +183,7 @@ class _Float8Matmul(torch.autograd.Function):
         # go_fp8 is [B, N] contiguous, we need go.T = [N, B] as first arg.
         # Transposing gives column-major, but first arg needs row-major,
         # so we must call .contiguous() to physically rearrange the memory.
-        go_T = go_fp8.t().contiguous()  # [N, B] row-major
+        go_T = _fp8_transpose(go_fp8)  # [N, B] row-major; prevent corrupting fusion
         in_col = _to_col_major(in_fp8)    # [B, K] column-major
         grad_weight = torch._scaled_mm(
             go_T,

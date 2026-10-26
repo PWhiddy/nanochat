@@ -435,9 +435,20 @@ class MuonAdamW(torch.optim.Optimizer):
             rank = 0
             world_size = 1
 
+        if world_size == 1:
+            # There is no communication to overlap on one GPU. Finish each group
+            # before stacking the next one's gradients/parameters, so these large
+            # temporary buffers don't all stay live until the end of the update.
+            for group in self.param_groups:
+                self._step_groups([group], rank, world_size)
+        else:
+            self._step_groups(self.param_groups, rank, world_size)
+
+    def _step_groups(self, groups, rank, world_size):
+        """Update a group batch, releasing its temporary buffers on return."""
         # Phase 1: launch all async reduce ops
         reduce_infos: list[dict] = []
-        for group in self.param_groups:
+        for group in groups:
             if group['kind'] == 'adamw':
                 reduce_infos.append(self._reduce_adamw(group, world_size))
             elif group['kind'] == 'muon':
@@ -447,7 +458,7 @@ class MuonAdamW(torch.optim.Optimizer):
 
         # Phase 2: wait for reduces, compute updates, launch gathers
         gather_list: list[dict] = []
-        for group, info in zip(self.param_groups, reduce_infos):
+        for group, info in zip(groups, reduce_infos):
             if group['kind'] == 'adamw':
                 self._compute_adamw(group, info, gather_list, rank, world_size)
             elif group['kind'] == 'muon':

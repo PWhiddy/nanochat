@@ -77,6 +77,32 @@ def test_determinism():
         assert torch.equal(pa, pb)
 
 
+def test_sequential_groups_match_batched_updates_and_state():
+    """Releasing stacks earlier must preserve every update and checkpoint tensor."""
+    params, groups = make_params_and_groups()
+    reference_params, reference_groups = make_params_and_groups()
+    for group in groups + reference_groups:
+        group["weight_decay"] = 0.1
+    optimizer = MuonAdamW(groups)
+    reference = MuonAdamW(reference_groups)
+    for step in range(5):
+        gen = torch.Generator(device=DEVICE).manual_seed(step)
+        for p, ref in zip(params, reference_params):
+            grad = torch.randn(p.shape, generator=gen, device=DEVICE) * 0.01
+            p.grad, ref.grad = grad.clone(), grad.clone()
+        optimizer.step()
+        # Original execution order: keep all groups' stacks alive until the end.
+        with torch.no_grad():
+            reference._step_groups(reference.param_groups, rank=0, world_size=1)
+        for p, ref in zip(params, reference_params):
+            assert torch.equal(p, ref)
+            assert torch.equal(p.grad, ref.grad)
+            assert optimizer.state[p].keys() == reference.state[ref].keys()
+            for name, actual in optimizer.state[p].items():
+                expected = reference.state[ref][name]
+                assert torch.equal(actual, expected) if isinstance(actual, torch.Tensor) else actual == expected
+
+
 def test_convergence():
     """Optimizing distance-to-target must actually approach the target."""
     targets_params, _ = make_params_and_groups(seed=999)
