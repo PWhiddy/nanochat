@@ -83,6 +83,8 @@ A few more notes:
 - If your GPU(s) have less than 80GB, you'll have to tune some of the hyperparameters or you will OOM / run out of VRAM. Look for `--device-batch-size` in the scripts and reduce it until things fit. E.g. from 32 (default) to 16, 8, 4, 2, or even 1. Less than that you'll have to know a bit more what you're doing and get more creative.
 - Most of the code is fairly vanilla PyTorch so it should run on anything that supports that - xpu, mps, or etc, but I haven't personally exercised all of these code paths so there might be sharp edges.
 
+For the 80.74M parameter NoPE experiment, run `bash runs/speedrun_80m_nope.sh` from the repository root. It shares the full speedrun pipeline (including FP8, evaluation, and SFT), using 15 layers, width 512, four attention heads, and MLP width 2048. Per-layer value embeddings are disabled, so the parameter budget goes into the attention/MLP stack and the usual token embedding/output matrices. Checkpoints use the separate tag `80m_nope`; chat with `python -m scripts.chat_cli --model-tag=80m_nope`. The original `bash runs/speedrun.sh` keeps its existing defaults.
+
 ## Research
 
 If you are a researcher and wish to help improve nanochat, two scripts of interest are [runs/scaling_laws.sh](runs/scaling_laws.sh) and [runs/miniseries.sh](runs/miniseries.sh). See [Jan 7 miniseries v1](https://github.com/karpathy/nanochat/discussions/420) for related documentation. For quick experimentation (~5 min pretraining runs) my favorite scale is to train a 12-layer model (GPT-1 sized), e.g. like this:

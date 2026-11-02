@@ -67,17 +67,26 @@ python -m scripts.tok_eval
 echo "Waiting for dataset download to complete..."
 wait $DATASET_DOWNLOAD_PID
 
-# d24 model (slightly undertrained to beat GPT-2 => decrease data:params ratio from compute optimal 10.5 (default) to 8)
-python -m scripts.base_train --depth=24 --target-param-data-ratio=8 --eval-tokens=1048576 --device-batch-size=2 --save-every 800 --fp8 --run=$WANDB_RUN
+# Experiment wrappers can supply architecture, batch size, and tag while sharing this pipeline.
+if ! declare -p SPEEDRUN_BASE_ARGS &> /dev/null; then
+    SPEEDRUN_BASE_ARGS=(--depth=24)
+fi
+device_batch_size="${SPEEDRUN_DEVICE_BATCH_SIZE:-2}"
+model_tag_args=()
+if [ -n "${SPEEDRUN_MODEL_TAG:-}" ]; then
+    model_tag_args=(--model-tag="$SPEEDRUN_MODEL_TAG")
+fi
+# Default d24 model (slightly undertrained to beat GPT-2 => data:params ratio 8).
+python -m scripts.base_train "${SPEEDRUN_BASE_ARGS[@]}" --target-param-data-ratio=8 --eval-tokens=1048576 --device-batch-size="$device_batch_size" --save-every 800 --fp8 --run=$WANDB_RUN "${model_tag_args[@]}"
 # evaluate the model: CORE metric, BPB on train/val, and draw samples
-python -m scripts.base_eval --device-batch-size=2 --split-tokens=8048576
+python -m scripts.base_eval --device-batch-size="$device_batch_size" --split-tokens=8048576 "${model_tag_args[@]}"
 
 # -----------------------------------------------------------------------------
 # SFT (teach the model conversation special tokens, tool use, multiple choice)
 
 # run SFT and eval the model
-python -m scripts.chat_sft --run=$WANDB_RUN
-python -m scripts.chat_eval -i sft
+python -m scripts.chat_sft --run=$WANDB_RUN "${model_tag_args[@]}"
+python -m scripts.chat_eval -i sft "${model_tag_args[@]}"
 
 # chat with the model over CLI! Leave out the -p to chat interactively
 # python -m scripts.chat_cli -p "Why is the sky blue?"
