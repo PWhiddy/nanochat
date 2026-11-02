@@ -60,7 +60,7 @@ parser.add_argument("--position-encoding", choices=["rope", "nope"], default="ro
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
 parser.add_argument("--target-param-data-ratio", type=float, default=12, help="calculate num_iterations to maintain data:param ratio (Chinchilla=20, -1 = disable)")
-parser.add_argument("--data-multiplier", type=int, default=1, help="multiply training steps and stretch optimization schedules, keeping the global batch size fixed")
+parser.add_argument("--data-multiplier", type=float, default=1.0, help="multiply training steps (rounded to whole updates) and stretch optimization schedules, keeping the global batch size fixed")
 # Optimization
 parser.add_argument("--device-batch-size", type=int, default=32, help="per-device batch size. good number to reduce to 16,8,4,... if you OOM on VRAM.")
 parser.add_argument("--total-batch-size", type=int, default=-1, help="total batch size in tokens. decent numbers are e.g. 524288. (-1 = auto-compute optimal)")
@@ -88,8 +88,8 @@ parser.add_argument("--model-tag", type=str, default=None, help="override model 
 args = parser.parse_args()
 if args.sample_max_tokens < 1:
     parser.error("--sample-max-tokens must be positive")
-if args.data_multiplier < 1:
-    parser.error("--data-multiplier must be at least 1")
+if not math.isfinite(args.data_multiplier) or args.data_multiplier < 1:
+    parser.error("--data-multiplier must be finite and at least 1")
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
 # Compute init and wandb logging
@@ -367,10 +367,11 @@ elif args.target_param_data_ratio > 0:
 else:
     raise ValueError("No training horizon specified")
 # Extend the resolved baseline horizon after batch-size selection and rounding,
-# so the data budget grows by exactly this factor without changing the batch/LRs.
+# so the data budget grows without changing the batch/LRs. Fractional multipliers
+# round to whole updates, allowing experiments to match another model's budget.
 if args.data_multiplier != 1:
-    print0(f"Multiplying training duration by {args.data_multiplier}: {num_iterations:,} -> {num_iterations * args.data_multiplier:,} iterations")
-num_iterations *= args.data_multiplier
+    print0(f"Multiplying training duration by {args.data_multiplier:g}: {num_iterations:,} -> {round(num_iterations * args.data_multiplier):,} iterations")
+num_iterations = round(num_iterations * args.data_multiplier)
 total_tokens = total_batch_size * num_iterations # the actual number of tokens we will train for
 print0(f"Total number of training tokens: {total_tokens:,}")
 print0(f"Tokens : Scaling params ratio: {total_batch_size * num_iterations / num_scaling_params:.2f}") # e.g. Chinchilla was ~20
@@ -378,7 +379,7 @@ print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
 
 # Learning rate schedule (linear warmup, constant, linear warmdown)
 def get_lr_multiplier(it):
-    warmup_iters = args.warmup_steps * args.data_multiplier
+    warmup_iters = round(args.warmup_steps * args.data_multiplier)
     warmdown_iters = round(args.warmdown_ratio * num_iterations)
     if it < warmup_iters:
         return (it + 1) / warmup_iters
@@ -392,7 +393,7 @@ def get_lr_multiplier(it):
 def get_muon_momentum(it):
     warmdown_iters = round(args.warmdown_ratio * num_iterations)
     warmdown_start = num_iterations - warmdown_iters
-    warmup_iters = 400 * args.data_multiplier
+    warmup_iters = round(400 * args.data_multiplier)
     if it < warmup_iters:
         frac = it / warmup_iters
         return (1 - frac) * 0.85 + frac * 0.97

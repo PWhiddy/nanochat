@@ -13,9 +13,10 @@ SPEEDRUN_BASE_ARGS=(
     --head-dim=128
     --no-value-embeddings
     --position-encoding=nope
-    # 4x the baseline token budget: 2,046,820,352 tokens / 3,904 updates.
+    # Match the original d24 speedrun: 5,838,471,168 tokens / 11,136 updates.
+    # Multiplier = 11,136 / 976 (the initial 80M run's update count).
     # Stretches LR/momentum warmup and decay; scales weight decay for the longer run.
-    --data-multiplier=4
+    --data-multiplier=11.40983606557377
 )
 # Per-device batch size for pretraining/evaluation; SFT inherits it from the checkpoint.
 SPEEDRUN_DEVICE_BATCH_SIZE=16
