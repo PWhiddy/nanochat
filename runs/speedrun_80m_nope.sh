@@ -15,8 +15,12 @@ SPEEDRUN_BASE_ARGS=(
     --position-encoding=nope
     # Match the original d24 speedrun: 5,838,471,168 tokens / 11,136 updates.
     # Multiplier = 11,136 / 976 (the initial 80M run's update count).
-    # Stretches LR/momentum warmup and decay; scales weight decay for the longer run.
+    # Stretches decay schedules and scales weight decay for the longer run.
     --data-multiplier=11.40983606557377
+    # Match d24's warmup token counts with half its global batch size.
+    # Warmup is independent of the training duration multiplier.
+    --warmup-steps=80
+    --muon-momentum-warmup-steps=800
 )
 # Per-device batch size for pretraining/evaluation; SFT inherits it from the checkpoint.
 SPEEDRUN_DEVICE_BATCH_SIZE=16

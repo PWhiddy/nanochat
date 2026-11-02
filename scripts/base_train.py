@@ -60,7 +60,7 @@ parser.add_argument("--position-encoding", choices=["rope", "nope"], default="ro
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
 parser.add_argument("--target-param-data-ratio", type=float, default=12, help="calculate num_iterations to maintain data:param ratio (Chinchilla=20, -1 = disable)")
-parser.add_argument("--data-multiplier", type=float, default=1.0, help="multiply training steps (rounded to whole updates) and stretch optimization schedules, keeping the global batch size fixed")
+parser.add_argument("--data-multiplier", type=float, default=1.0, help="multiply training steps (rounded to whole updates) and stretch decay schedules; batch size and warmup steps stay fixed")
 # Optimization
 parser.add_argument("--device-batch-size", type=int, default=32, help="per-device batch size. good number to reduce to 16,8,4,... if you OOM on VRAM.")
 parser.add_argument("--total-batch-size", type=int, default=-1, help="total batch size in tokens. decent numbers are e.g. 524288. (-1 = auto-compute optimal)")
@@ -70,6 +70,7 @@ parser.add_argument("--weight-decay", type=float, default=0.28, help="cautious w
 parser.add_argument("--matrix-lr", type=float, default=0.02, help="learning rate for matrix parameters (Muon)")
 parser.add_argument("--scalar-lr", type=float, default=0.5, help="learning rate for scalars (resid_lambdas, x0_lambdas)")
 parser.add_argument("--warmup-steps", type=int, default=40, help="number of steps for LR warmup")
+parser.add_argument("--muon-momentum-warmup-steps", type=int, default=400, help="number of steps to ramp Muon momentum from 0.85 to 0.97")
 parser.add_argument("--warmdown-ratio", type=float, default=0.65, help="ratio of iterations for LR warmdown")
 parser.add_argument("--final-lr-frac", type=float, default=0.05, help="final LR as fraction of initial LR")
 parser.add_argument("--resume-from-step", type=int, default=-1, help="resume training from this step (-1 = disable)")
@@ -90,6 +91,8 @@ if args.sample_max_tokens < 1:
     parser.error("--sample-max-tokens must be positive")
 if not math.isfinite(args.data_multiplier) or args.data_multiplier < 1:
     parser.error("--data-multiplier must be finite and at least 1")
+if args.warmup_steps < 0 or args.muon_momentum_warmup_steps < 0:
+    parser.error("warmup steps must be nonnegative")
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
 # Compute init and wandb logging
@@ -379,7 +382,7 @@ print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
 
 # Learning rate schedule (linear warmup, constant, linear warmdown)
 def get_lr_multiplier(it):
-    warmup_iters = round(args.warmup_steps * args.data_multiplier)
+    warmup_iters = args.warmup_steps
     warmdown_iters = round(args.warmdown_ratio * num_iterations)
     if it < warmup_iters:
         return (it + 1) / warmup_iters
@@ -393,7 +396,7 @@ def get_lr_multiplier(it):
 def get_muon_momentum(it):
     warmdown_iters = round(args.warmdown_ratio * num_iterations)
     warmdown_start = num_iterations - warmdown_iters
-    warmup_iters = round(400 * args.data_multiplier)
+    warmup_iters = args.muon_momentum_warmup_steps
     if it < warmup_iters:
         frac = it / warmup_iters
         return (1 - frac) * 0.85 + frac * 0.97
