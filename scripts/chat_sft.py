@@ -62,6 +62,7 @@ parser.add_argument("--eval-tokens", type=int, default=40*524288, help="number o
 parser.add_argument("--chatcore-every", type=int, default=200, help="evaluate ChatCORE metric every N steps (-1 = disable)")
 parser.add_argument("--chatcore-max-cat", type=int, default=-1, help="max problems per categorical task for ChatCORE")
 parser.add_argument("--chatcore-max-sample", type=int, default=24, help="max problems per generative task for ChatCORE")
+parser.add_argument("--chatcore-max-new-tokens", type=int, default=512, help="generation token budget for ChatCORE")
 # Data mixture
 parser.add_argument("--mmlu-epochs", type=int, default=3, help="number of epochs of MMLU in training mixture (teaches Multiple Choice)")
 parser.add_argument("--gsm8k-epochs", type=int, default=4, help="number of epochs of GSM8K in training mixture (teaches Math and Tool Use)")
@@ -126,7 +127,7 @@ grad_accum_steps = args.total_batch_size // world_tokens_per_fwdbwd
 print0(f"Tokens / micro-batch / rank: {args.device_batch_size} x {args.max_seq_len} = {tokens_per_fwdbwd:,}")
 print0(f"Tokens / micro-batch: {world_tokens_per_fwdbwd:,}")
 print0(f"Total batch size {args.total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
-token_bytes = get_token_bytes(device=device)
+token_bytes = get_token_bytes(device=device, vocab_size=tokenizer.get_vocab_size())
 
 # Initialize the Optimizer (combined MuonAdamW: Muon for matrix params, AdamW for rest)
 # Note that pretraining ramps weight_decay to zero by end of pretraining, so SFT continues with zero
@@ -371,7 +372,8 @@ while True:
             limit = args.chatcore_max_cat if task_name in categorical_tasks else args.chatcore_max_sample
             max_problems = None if limit < 0 else limit  # -1 means no limit
             acc = run_chat_eval(task_name, orig_model, tokenizer, engine,
-                                batch_size=args.device_batch_size, max_problems=max_problems)
+                                batch_size=args.device_batch_size, max_problems=max_problems,
+                                max_new_tokens=args.chatcore_max_new_tokens)
             task_results[task_name] = acc
             print0(f"  {task_name}: {100*acc:.2f}%")
         # Compute ChatCORE metrics (mean centered accuracy, ranges from 0=random to 1=perfect)

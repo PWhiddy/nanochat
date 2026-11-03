@@ -108,7 +108,14 @@ def build_model(checkpoint_dir, step, device, phase):
     else:
         model.train()
     # Load the Tokenizer
-    tokenizer = get_tokenizer()
+    if model_config.vocab_size == 256:
+        # A BPE tokenizer needs at least 256 byte IDs plus the chat markers.
+        # The fixed byte codec is identified unambiguously by this vocabulary,
+        # so checkpoints also load correctly outside the experiment's shell.
+        from nanochat.byte_tokenizer import ByteTokenizer
+        tokenizer = ByteTokenizer()
+    else:
+        tokenizer = get_tokenizer()
     # Sanity check: compatibility between model and tokenizer
     assert tokenizer.get_vocab_size() == model_config_kwargs["vocab_size"], f"Tokenizer vocab size {tokenizer.get_vocab_size()} does not match model config vocab size {model_config_kwargs['vocab_size']}"
     return model, tokenizer, meta_data

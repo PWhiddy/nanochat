@@ -82,12 +82,15 @@ while True:
         "top_k": args.top_k,
     }
     response_tokens = []
+    byte_decoder = tokenizer.decoder() if hasattr(tokenizer, "decoder") else None
     print("\nAssistant: ", end="", flush=True)
     for token_column, token_masks in engine.generate(conversation_tokens, **generate_kwargs):
         token = token_column[0] # pop the batch dimension (num_samples=1)
         response_tokens.append(token)
-        token_text = tokenizer.decode([token])
+        token_text = byte_decoder.decode(tokenizer.decode_single_token_bytes(token)) if byte_decoder is not None else tokenizer.decode([token])
         print(token_text, end="", flush=True)
+    if byte_decoder is not None:
+        print(byte_decoder.decode(b"", final=True), end="", flush=True)
     print()
     # we have to ensure that the assistant end token is the last token
     # so even if generation ends due to max tokens, we have to append it to the end
